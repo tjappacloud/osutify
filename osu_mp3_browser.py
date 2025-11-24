@@ -7,6 +7,7 @@ import sys
 import re
 import time
 import json
+import random
 
 # try to import Pillow for image thumbnails
 try:
@@ -30,7 +31,6 @@ SUPPORTED_AUDIO_EXTS = ('.mp3', '.ogg')
 MIN_DURATION_SECONDS = 30
 CACHE_FILENAME = '.osu_mp3_browser_cache.json'
 
-
 def get_default_osu_songs_dir():
     # Typical osu! songs path on Windows
     home = Path.home()
@@ -43,6 +43,31 @@ def strip_leading_numbers(s: str) -> str:
     if not s:
         return s
     return re.sub(r'^\s*\d+[\s._-]*', '', s)
+
+
+def parse_artist_from_folder(folder_name: str) -> str:
+    """Try to extract an artist name from a folder name like 'Artist - Title' or 'Artist: Title'.
+    Returns the artist string or empty if not identifiable.
+    """
+    if not folder_name:
+        return ''
+    # remove leading/trailing whitespace and common surrounding characters
+    name = folder_name.strip()
+    # Try a regex that captures everything up to the first separator (handles multi-word names)
+    try:
+        m = re.match(r"^\s*(?P<artist>.+?)\s*(?:[-–—:|~]+)\s+", name)
+        if m:
+            return m.group('artist').strip()
+    except Exception:
+        pass
+    # fallback: split on first occurrence of any common separator
+    try:
+        parts = re.split(r"\s*[-–—:|~]+\s*", name, maxsplit=1)
+        if parts and parts[0].strip():
+            return parts[0].strip()
+    except Exception:
+        pass
+    return ''
 
 
 class OsuMP3Browser(tk.Tk):
@@ -75,6 +100,8 @@ class OsuMP3Browser(tk.Tk):
 
         # minimum duration (seconds) configurable via UI
         self.min_duration_var = tk.IntVar(value=MIN_DURATION_SECONDS)
+        # string var for entry widget so we can accept free text and validate on submit
+        self.min_duration_strvar = tk.StringVar(value=str(self.min_duration_var.get()))
         # dark mode toggle
         self.dark_mode_var = tk.BooleanVar(value=False)
 
@@ -135,14 +162,46 @@ class OsuMP3Browser(tk.Tk):
         left = ttk.Frame(mid)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.listbox = tk.Listbox(left, activestyle='none')
-        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Create a container so we can place vertical and horizontal scrollbars correctly
+        list_container = ttk.Frame(left)
+        list_container.pack(fill=tk.BOTH, expand=True)
+
+        # listbox inside container using grid so hscroll sits under list and vscroll to right
+        self.listbox = tk.Listbox(list_container, activestyle='none')
+        self.listbox.grid(row=0, column=0, sticky='nsew')
         self.listbox.bind('<Double-1>', self.on_double_click)
         self.listbox.bind('<<ListboxSelect>>', self.on_select)
 
-        scrollbar = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # vertical scrollbar
+        try:
+            scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.listbox.yview)
+        except Exception:
+            scrollbar = tk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.listbox.yview)
+        scrollbar.grid(row=0, column=1, sticky='ns')
         self.listbox.config(yscrollcommand=scrollbar.set)
+
+        # horizontal scrollbar beneath
+        try:
+            self.hscroll = ttk.Scrollbar(list_container, orient=tk.HORIZONTAL, command=self.listbox.xview)
+        except Exception:
+            self.hscroll = tk.Scrollbar(list_container, orient=tk.HORIZONTAL, command=self.listbox.xview)
+        self.hscroll.grid(row=1, column=0, columnspan=2, sticky='ew')
+        self.listbox.config(xscrollcommand=self.hscroll.set)
+
+        # Make grid expand
+        try:
+            list_container.rowconfigure(0, weight=1)
+            list_container.columnconfigure(0, weight=1)
+        except Exception:
+            pass
+
+        # Lightweight tooltip for showing full title on hover with delay
+        self._title_tooltip = None
+        self._tooltip_after_id = None
+        self._last_tooltip_index = None
+        self._tooltip_delay_ms = 400
+        self.listbox.bind('<Motion>', self._on_listbox_motion)
+        self.listbox.bind('<Leave>', self._hide_title_tooltip)
 
         right = ttk.Frame(mid, width=240)
         right.pack(side=tk.RIGHT, fill=tk.Y)
@@ -203,6 +262,18 @@ class OsuMP3Browser(tk.Tk):
         self.stop_btn = ttk.Button(bottom, text="Stop", command=self.stop)
         self.stop_btn.pack(side=tk.LEFT)
 
+        # play mode button: 'sequential', 'loop' (repeat current), 'shuffle' (random next)
+        self.play_mode = 'sequential'  # default: advance to next
+        try:
+            self.mode_btn = ttk.Button(bottom, text="Mode: Sequential", command=self.cycle_play_mode)
+            self.mode_btn.pack(side=tk.LEFT, padx=(6, 0))
+        except Exception:
+            try:
+                self.mode_btn = tk.Button(bottom, text="Mode: Sequential", command=self.cycle_play_mode)
+                self.mode_btn.pack(side=tk.LEFT, padx=(6, 0))
+            except Exception:
+                self.mode_btn = None
+
         # Volume control
         self.volume_label = ttk.Label(bottom, text=f"Vol: {int(self.volume_var.get()*100)}%")
         self.volume_label.pack(side=tk.LEFT, padx=(8, 4))
@@ -213,19 +284,24 @@ class OsuMP3Browser(tk.Tk):
         self.volume_scale.pack(side=tk.LEFT)
 
         # Minimum duration spinbox
+        # Replace spinbox with a free-text Entry for integer seconds input.
         try:
-            # ttk.Spinbox is available in newer tkinter versions
             self.min_label = ttk.Label(bottom, text="Min length (s):")
             self.min_label.pack(side=tk.LEFT, padx=(8, 4))
-            self.min_spin = ttk.Spinbox(bottom, from_=0, to=3600, textvariable=self.min_duration_var, width=6, command=lambda: threading.Thread(target=self._on_min_duration_changed, daemon=True).start())
-            self.min_spin.pack(side=tk.LEFT)
+            self.min_entry = ttk.Entry(bottom, textvariable=self.min_duration_strvar, width=8)
+            self.min_entry.pack(side=tk.LEFT)
+            # on Enter or focus-out, validate and trigger a background rescan
+            self.min_entry.bind('<Return>', lambda e: threading.Thread(target=self._on_min_duration_changed, daemon=True).start())
+            self.min_entry.bind('<FocusOut>', lambda e: threading.Thread(target=self._on_min_duration_changed, daemon=True).start())
         except Exception:
-            # fallback to tk.Spinbox
+            # fallback to simple tk.Entry
             try:
                 self.min_label = ttk.Label(bottom, text="Min length (s):")
                 self.min_label.pack(side=tk.LEFT, padx=(8, 4))
-                self.min_spin = tk.Spinbox(bottom, from_=0, to=3600, textvariable=self.min_duration_var, width=6, command=lambda: threading.Thread(target=self._on_min_duration_changed, daemon=True).start())
-                self.min_spin.pack(side=tk.LEFT)
+                self.min_entry = tk.Entry(bottom, textvariable=self.min_duration_strvar, width=8)
+                self.min_entry.pack(side=tk.LEFT)
+                self.min_entry.bind('<Return>', lambda e: threading.Thread(target=self._on_min_duration_changed, daemon=True).start())
+                self.min_entry.bind('<FocusOut>', lambda e: threading.Thread(target=self._on_min_duration_changed, daemon=True).start())
             except Exception:
                 pass
 
@@ -311,6 +387,17 @@ class OsuMP3Browser(tk.Tk):
                     pass
             try:
                 self.current_label.config(text=f"Found {len(self.all_mp3_paths)} audio files (cached)")
+            except Exception:
+                pass
+            # update play mode button label to reflect loaded mode
+            try:
+                if self.mode_btn:
+                    label = 'Mode: Sequential'
+                    if self.play_mode == 'loop':
+                        label = 'Mode: Loop'
+                    elif self.play_mode == 'shuffle':
+                        label = 'Mode: Shuffle'
+                    self.mode_btn.config(text=label)
             except Exception:
                 pass
         except Exception:
@@ -413,6 +500,10 @@ class OsuMP3Browser(tk.Tk):
             try:
                 if settings.get('dark_mode') is not None:
                     self.dark_mode_var.set(bool(settings.get('dark_mode')))
+                if settings.get('play_mode'):
+                    pm = settings.get('play_mode')
+                    if pm in ('sequential', 'loop', 'shuffle'):
+                        self.play_mode = pm
             except Exception:
                 pass
 
@@ -466,7 +557,16 @@ class OsuMP3Browser(tk.Tk):
                 except Exception:
                     continue
             try:
-                payload = {'items': out, 'settings': {'dark_mode': bool(self.dark_mode_var.get())}}
+                settings = {}
+                try:
+                    settings['dark_mode'] = bool(self.dark_mode_var.get())
+                except Exception:
+                    settings['dark_mode'] = False
+                try:
+                    settings['play_mode'] = str(self.play_mode)
+                except Exception:
+                    settings['play_mode'] = 'sequential'
+                payload = {'items': out, 'settings': settings}
                 with self.cache_path.open('w', encoding='utf-8') as f:
                     json.dump(payload, f, ensure_ascii=False, indent=2)
             except Exception:
@@ -489,6 +589,23 @@ class OsuMP3Browser(tk.Tk):
     def _on_min_duration_changed(self):
         """Called when the min duration spinbox changes: trigger a re-scan so UI reflects new cutoff."""
         try:
+            # parse user input from string var, update IntVar with a safe integer
+            try:
+                s = (self.min_duration_strvar.get() or '').strip()
+                if s == '':
+                    val = MIN_DURATION_SECONDS
+                else:
+                    val = int(float(s))
+                    if val < 0:
+                        val = 0
+            except Exception:
+                val = MIN_DURATION_SECONDS
+            try:
+                self.min_duration_var.set(val)
+                # keep the string in sync (normalize formatting)
+                self.min_duration_strvar.set(str(val))
+            except Exception:
+                pass
             # kick off a background re-scan (scan_and_populate already schedules UI updates)
             threading.Thread(target=self.scan_and_populate, daemon=True).start()
         except Exception:
@@ -754,6 +871,11 @@ class OsuMP3Browser(tk.Tk):
             self.current_label.config(text=f"Playing: {folder_title}")
             # Update now-playing display (thumbnail + title)
             self.now_title_label.config(text=f"Now: {folder_title}")
+            # also update the right-side metadata panel to reflect the playing file
+            try:
+                self._update_meta_display(path)
+            except Exception:
+                pass
             # start updating progress
             self._playing_path = path
             # Initialize manual timing base so progress/time are consistent
@@ -901,6 +1023,173 @@ class OsuMP3Browser(tk.Tk):
         self.progress['value'] = 0
         self.time_label.config(text="0:00 / 0:00")
 
+    def toggle_loop(self):
+        """Toggle looping of the current song. When enabled, the current track will replay after ending."""
+        try:
+            # kept for backwards-compat; map into play_mode
+            if self.play_mode == 'loop':
+                self.play_mode = 'sequential'
+            else:
+                self.play_mode = 'loop'
+            try:
+                if self.mode_btn:
+                    self.mode_btn.config(text=("Mode: Loop" if self.play_mode == 'loop' else "Mode: Sequential"))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def cycle_play_mode(self):
+        """Cycle play mode between 'sequential' -> 'loop' -> 'shuffle' -> sequential."""
+        try:
+            if self.play_mode == 'sequential':
+                self.play_mode = 'loop'
+            elif self.play_mode == 'loop':
+                self.play_mode = 'shuffle'
+            else:
+                self.play_mode = 'sequential'
+            # update button text
+            try:
+                if self.mode_btn:
+                    label = 'Mode: Sequential'
+                    if self.play_mode == 'loop':
+                        label = 'Mode: Loop'
+                    elif self.play_mode == 'shuffle':
+                        label = 'Mode: Shuffle'
+                    self.mode_btn.config(text=label)
+            except Exception:
+                pass
+            # persist mode into cache
+            try:
+                self._save_cache()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _on_track_end(self):
+        """Called when the current track finishes playing. Decide whether to loop or play next."""
+        try:
+            # if loop enabled, restart same track
+            if self.play_mode == 'loop' and self._playing_path:
+                try:
+                    # restart playback of current file
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
+                try:
+                    pygame.mixer.music.play()
+                except Exception:
+                    # fallback to reload & play
+                    try:
+                        pygame.mixer.music.load(str(self._playing_path))
+                        pygame.mixer.music.play()
+                    except Exception:
+                        pass
+                # reset manual timing
+                try:
+                    self._start_time = time.time()
+                    self._pause_time = None
+                    self._paused_offset = 0.0
+                    self.paused = False
+                except Exception:
+                    pass
+                # continue progress polling
+                try:
+                    if self._progress_after_id:
+                        try:
+                            self.after_cancel(self._progress_after_id)
+                        except Exception:
+                            pass
+                    self.update_progress()
+                except Exception:
+                    pass
+                return
+
+            # otherwise, play the next visible song (in self.mp3_paths)
+            try:
+                if not self._playing_path:
+                    return
+
+                # If shuffle mode, pick a random song from the whole library (`all_mp3_paths`).
+                if self.play_mode == 'shuffle':
+                    try:
+                        candidates = [p for (p, t) in self.all_mp3_paths]
+                        if not candidates:
+                            self._playing_path = None
+                            return
+                        # avoid immediate repeat when possible
+                        if len(candidates) > 1:
+                            choices = [c for c in candidates if str(c) != str(self._playing_path)]
+                            if choices:
+                                chosen = random.choice(choices)
+                            else:
+                                chosen = random.choice(candidates)
+                        else:
+                            chosen = candidates[0]
+
+                        # play chosen file
+                        try:
+                            # if chosen visible in mp3_paths, select it
+                            idx = next((i for i, (pp, _) in enumerate(self.mp3_paths) if pp == chosen), None)
+                            try:
+                                self.listbox.selection_clear(0, tk.END)
+                            except Exception:
+                                pass
+                            if idx is not None:
+                                try:
+                                    self.listbox.selection_set(idx)
+                                    self.listbox.see(idx)
+                                except Exception:
+                                    pass
+                            self._play_path(chosen)
+                        except Exception:
+                            pass
+                        return
+                    except Exception:
+                        pass
+
+                # otherwise behave sequentially within visible list
+                # find current index in visible list (mp3_paths)
+                cur_index = None
+                for i, (p, t) in enumerate(self.mp3_paths):
+                    try:
+                        if p == self._playing_path:
+                            cur_index = i
+                            break
+                    except Exception:
+                        continue
+                if cur_index is None:
+                    # not in visible list; stop
+                    self._playing_path = None
+                    return
+                next_index = cur_index + 1
+                if next_index >= len(self.mp3_paths):
+                    # reached end; stop playback
+                    self._playing_path = None
+                    try:
+                        self.current_label.config(text="Not playing")
+                    except Exception:
+                        pass
+                    return
+                # select and play next
+                next_path = self.mp3_paths[next_index][0]
+                try:
+                    # update listbox selection on main thread
+                    try:
+                        self.listbox.selection_clear(0, tk.END)
+                        self.listbox.selection_set(next_index)
+                        self.listbox.see(next_index)
+                    except Exception:
+                        pass
+                    self._play_path(next_path)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def toggle_fullscreen(self, event=None):
         try:
             # Toggle between zoomed (maximized) and normal windowed state
@@ -947,6 +1236,18 @@ class OsuMP3Browser(tk.Tk):
         # display song name based on folder name
         title = strip_leading_numbers(path.parent.name)
         artist = meta.get('artist') or ''
+        if not artist:
+            # parse artist from folder name if not present in tags
+            artist = parse_artist_from_folder(title) or ''
+            # persist parsed artist into metadata cache so it is available later
+            try:
+                key = str(path)
+                meta_entry = self._metadata.get(key, {})
+                if not meta_entry.get('artist'):
+                    meta_entry['artist'] = artist
+                    self._metadata[key] = meta_entry
+            except Exception:
+                pass
         album = meta.get('album') or ''
         duration = format_duration(meta.get('duration')) if meta.get('duration') else ''
         self.meta_title.config(text=f"Title: {title}")
@@ -986,6 +1287,181 @@ class OsuMP3Browser(tk.Tk):
             if hasattr(self.meta_image_label, '_photo_ref'):
                 delattr(self.meta_image_label, '_photo_ref')
 
+    def _update_meta_display(self, path: Path):
+        """Update the right-side metadata panel (title/artist/album/duration/path/image) for `path`."""
+        try:
+            meta = self._metadata.get(str(path), {})
+            # display song name based on folder name
+            title = strip_leading_numbers(path.parent.name)
+            artist = meta.get('artist') or ''
+            if not artist:
+                artist = parse_artist_from_folder(title) or ''
+                # persist parsed artist into metadata cache
+                try:
+                    key = str(path)
+                    meta_entry = self._metadata.get(key, {})
+                    if not meta_entry.get('artist'):
+                        meta_entry['artist'] = artist
+                        self._metadata[key] = meta_entry
+                except Exception:
+                    pass
+            album = meta.get('album') or ''
+            duration = format_duration(meta.get('duration')) if meta.get('duration') else ''
+            try:
+                self.meta_title.config(text=f"Title: {title}")
+                self.meta_artist.config(text=f"Artist: {artist}")
+                self.meta_album.config(text=f"Album: {album}")
+                self.meta_duration.config(text=f"Duration: {duration}")
+                self.meta_path.config(text=f"Path: {path}")
+            except Exception:
+                pass
+
+            # load background image for meta panel
+            bg = get_osu_background(path.parent)
+            if bg and HAS_PIL:
+                try:
+                    from PIL import Image as PILImage, ImageTk as PILImageTk
+                    img = PILImage.open(bg)
+                    resampling = getattr(PILImage, 'Resampling', None)
+                    if resampling is not None:
+                        resample = getattr(resampling, 'LANCZOS', None)
+                    else:
+                        resample = getattr(PILImage, 'LANCZOS', None)
+                    if resample is not None:
+                        img.thumbnail((220, 140), resample)
+                    else:
+                        img.thumbnail((220, 140))
+                    photo = PILImageTk.PhotoImage(img)
+                    self.meta_image_label.config(image=photo)
+                    setattr(self.meta_image_label, '_photo_ref', photo)
+                except Exception:
+                    try:
+                        self.meta_image_label.config(image='')
+                    except Exception:
+                        pass
+                    if hasattr(self.meta_image_label, '_photo_ref'):
+                        delattr(self.meta_image_label, '_photo_ref')
+            else:
+                try:
+                    self.meta_image_label.config(image='')
+                except Exception:
+                    pass
+                if hasattr(self.meta_image_label, '_photo_ref'):
+                    delattr(self.meta_image_label, '_photo_ref')
+        except Exception:
+            pass
+
+    def _on_listbox_motion(self, event):
+        """Schedule showing a tooltip near the mouse with the full list item text after a short delay."""
+        try:
+            lb = event.widget
+            idx = lb.nearest(event.y)
+            if idx is None:
+                self._hide_title_tooltip()
+                return
+            try:
+                text = lb.get(idx)
+            except Exception:
+                text = ''
+            if not text:
+                self._hide_title_tooltip()
+                return
+
+            # if mouse is still over same index, don't reschedule
+            if self._last_tooltip_index == idx and self._title_tooltip:
+                # update position if visible
+                try:
+                    x = event.x_root + 12
+                    y = event.y_root + 18
+                    try:
+                        self._title_tooltip.wm_geometry(f"+{x}+{y}")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                return
+
+            self._last_tooltip_index = idx
+            # cancel previous scheduled show
+            try:
+                if self._tooltip_after_id:
+                    self.after_cancel(self._tooltip_after_id)
+            except Exception:
+                pass
+
+            # schedule showing tooltip after delay
+            try:
+                x = event.x_root + 12
+                y = event.y_root + 18
+                self._tooltip_after_id = self.after(self._tooltip_delay_ms, lambda: self._show_title_tooltip(x, y, text, idx))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _hide_title_tooltip(self, event=None):
+        try:
+            if self._title_tooltip:
+                try:
+                    self._title_tooltip.destroy()
+                except Exception:
+                    pass
+                self._title_tooltip = None
+            # cancel any scheduled show
+            try:
+                aid = getattr(self, '_tooltip_after_id', None)
+                if aid is not None:
+                    # ensure after_cancel exists and aid is a valid id
+                    try:
+                        cancel = getattr(self, 'after_cancel', None)
+                        if callable(cancel):
+                            cancel(aid)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self._tooltip_after_id = None
+            self._last_tooltip_index = None
+        except Exception:
+            pass
+
+    def _show_title_tooltip(self, x, y, text, idx):
+        """Create and show the tooltip immediately at x,y with given text."""
+        try:
+            # clear any previous tooltip
+            try:
+                if self._title_tooltip:
+                    try:
+                        self._title_tooltip.destroy()
+                    except Exception:
+                        pass
+                    self._title_tooltip = None
+            except Exception:
+                pass
+
+            dark = bool(self.dark_mode_var.get()) if hasattr(self, 'dark_mode_var') else False
+            if dark:
+                bg = '#222222'
+                fg = '#f0f0f0'
+            else:
+                bg = '#ffffe0'
+                fg = '#000000'
+
+            tw = tk.Toplevel(self)
+            tw.wm_overrideredirect(True)
+            # use tk.Label for easier bg/fg control
+            lbl = tk.Label(tw, text=text, bg=bg, fg=fg, bd=1, relief='solid')
+            lbl.pack(ipadx=6, ipady=3)
+            try:
+                tw.wm_geometry(f"+{x}+{y}")
+            except Exception:
+                pass
+            self._title_tooltip = tw
+            # clear scheduled id
+            self._tooltip_after_id = None
+        except Exception:
+            pass
+
     def _clear_search(self):
         self.search_var.set('')
         self.refresh_list()
@@ -1008,12 +1484,20 @@ class OsuMP3Browser(tk.Tk):
             # timing isn't available.
             busy = pygame.mixer.music.get_busy()
             if not busy and not self.paused:
-                # mark complete
-                if total:
-                    self.progress['value'] = 1000
-                    self.time_label.config(text=f"{format_duration(total)} / {format_duration(total)}")
-                # cancel further updates
-                self._playing_path = None
+                # playback finished; handle end-of-track behavior (loop or advance)
+                try:
+                    # ensure progress/time shows complete
+                    if total:
+                        self.progress['value'] = 1000
+                        self.time_label.config(text=f"{format_duration(total)} / {format_duration(total)}")
+                except Exception:
+                    pass
+                try:
+                    # handle track end (this will call _play_path for next or loop)
+                    self._on_track_end()
+                except Exception:
+                    # fallback: clear playing state
+                    self._playing_path = None
                 return
 
             # Compute position using manual base when possible
