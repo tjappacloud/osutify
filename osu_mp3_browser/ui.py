@@ -228,17 +228,10 @@ class OsuMP3Browser(tk.Tk):
         self.meta_title.pack(anchor=tk.W, padx=6, pady=4)
         self.meta_artist = ttk.Label(right, text="Artist: ", width=self._meta_label_width, wraplength=440, justify=tk.LEFT)
         self.meta_artist.pack(anchor=tk.W, padx=6, pady=4)
-        self.meta_album = ttk.Label(right, text="Album: ", width=self._meta_label_width, wraplength=440, justify=tk.LEFT)
-        self.meta_album.pack(anchor=tk.W, padx=6, pady=4)
+        # Album and Path metadata removed for a cleaner UI
         self.meta_duration = ttk.Label(right, text="Duration: ", width=self._meta_label_width, wraplength=440, justify=tk.LEFT)
         self.meta_duration.pack(anchor=tk.W, padx=6, pady=4)
-        self.meta_path = ttk.Label(right, text="Path: ", width=self._meta_label_width, wraplength=440, justify=tk.LEFT)
-        self.meta_path.pack(anchor=tk.W, padx=6, pady=4)
-        try:
-            self.meta_path.bind('<Enter>', self._on_meta_path_enter)
-            self.meta_path.bind('<Leave>', self._on_meta_path_leave)
-        except Exception:
-            pass
+        # self.meta_path removed
 
         bottom = ttk.Frame(self)
         bottom.grid(row=4, column=0, sticky='ew', padx=8, pady=6)
@@ -784,8 +777,8 @@ class OsuMP3Browser(tk.Tk):
                 except Exception:
                     return
 
-            # Update wraplength for all metadata labels
-            for lbl in (self.meta_title, self.meta_artist, self.meta_album, self.meta_duration, self.meta_path):
+            # Update wraplength for visible metadata labels
+            for lbl in (self.meta_title, self.meta_artist, self.meta_duration):
                 try:
                     lbl.config(wraplength=width_px)
                 except Exception:
@@ -811,7 +804,7 @@ class OsuMP3Browser(tk.Tk):
                 self._meta_label_width = per_line_chars
             except Exception:
                 pass
-            for lbl in (self.meta_title, self.meta_artist, self.meta_album, self.meta_duration, self.meta_path):
+            for lbl in (self.meta_title, self.meta_artist, self.meta_duration):
                 try:
                     lbl.config(width=self._meta_label_width)
                 except Exception:
@@ -2433,20 +2426,13 @@ class OsuMP3Browser(tk.Tk):
                     self._metadata[key] = meta_entry
             except Exception:
                 pass
-        album = meta.get('album') or ''
         duration = format_duration(meta.get('duration')) if meta.get('duration') else ''
         per_line = getattr(self, '_meta_label_width', 52)
         self.meta_title.config(text=self._format_meta_two_lines('Title: ', title, per_line))
         self.meta_artist.config(text=self._format_meta_two_lines('Artist: ', artist, per_line))
-        self.meta_album.config(text=self._format_meta_two_lines('Album: ', album, per_line))
         # Duration: keep two-line shape for stability
         self.meta_duration.config(text=self._format_meta_two_lines('Duration: ', duration, per_line))
-        self.meta_path.config(text=self._format_meta_two_lines('Path: ', str(path), per_line, middle=True))
-        # Store the full path for tooltip
-        try:
-            self._meta_path_full = str(path)
-        except Exception:
-            self._meta_path_full = ''
+        # Path display removed
         # Try to load background from the first .osu file in the folder
         bg = get_osu_background(path.parent)
         if bg and HAS_PIL and Image and ImageTk:
@@ -2504,20 +2490,13 @@ class OsuMP3Browser(tk.Tk):
                         self._metadata[key] = meta_entry
                 except Exception:
                     pass
-            album = meta.get('album') or ''
             duration = format_duration(meta.get('duration')) if meta.get('duration') else ''
             try:
                 per_line = getattr(self, '_meta_label_width', 52)
                 self.meta_title.config(text=self._format_meta_two_lines('Title: ', title, per_line))
                 self.meta_artist.config(text=self._format_meta_two_lines('Artist: ', artist, per_line))
-                self.meta_album.config(text=self._format_meta_two_lines('Album: ', album, per_line))
                 self.meta_duration.config(text=self._format_meta_two_lines('Duration: ', duration, per_line))
-                self.meta_path.config(text=self._format_meta_two_lines('Path: ', str(path), per_line, middle=True))
-                # Store full path for tooltip
-                try:
-                    self._meta_path_full = str(path)
-                except Exception:
-                    self._meta_path_full = ''
+                # Path display removed
             except Exception:
                 pass
 
@@ -2656,7 +2635,7 @@ class OsuMP3Browser(tk.Tk):
             full = getattr(self, '_meta_path_full', '')
             if not full:
                 return
-            widget = self.meta_path if hasattr(self, 'meta_path') and self.meta_path is not None else (event.widget if event is not None else None)
+            widget = getattr(self, 'meta_path', None) if getattr(self, 'meta_path', None) is not None else (event.widget if event is not None else None)
             if widget is None:
                 return
             x = widget.winfo_rootx() + 10
