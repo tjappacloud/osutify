@@ -1,5 +1,65 @@
 # osu! Song Browser
 
+A fast, thumbnail-rich browser for your osu! `Songs` folder. Play tracks, manage playlists, and view listening stats.
+
+## Setup
+
+1. Install dependencies:
+
+	```powershell
+	pip install -r requirements.txt
+	```
+    
+2. Run the app:
+	```powershell
+	python main.py
+	```
+
+## Highlights
+
+- Thumbnail list: Song list uses a Treeview with per-item thumbnails sourced from `.osu` backgrounds or folder images.
+- Disk thumbnail cache: Thumbnails are saved under `~/.osu_song_browser_thumbs` for instant loading on subsequent runs.
+- Actions dropdown: Top-row Menubutton with key actions:
+	- Browse…
+	- Scan Now
+	- Clear Thumbs (wipes disk and memory caches; regenerates as needed)
+	- Stats
+	- Dark Mode toggle
+- Dark mode: Theme-switching is stable and no longer inflates font sizes on repeated toggles.
+- Larger visuals: Configured larger thumbnails (default now 96×96), widened columns, and increased row height for readability.
+
+## Playlists
+
+- Create playlists, add selected songs, and play sequentially or shuffled.
+- Compact playlist panel with tracks list and inline status messages.
+
+## Stats Page
+
+- Persistent stats stored at `~/.osu_song_browser_stats.json`:
+	- Play count per song
+	- Time listened (seconds accumulated)
+	- Last played timestamp
+- Stats window includes:
+	- Columns: Title, Plays, Time Listened, Last Played
+	- Sorting: Click any column header to sort (numeric/time aware)
+	- Filter: Live title filter box to narrow results
+
+## Searching
+
+- Main list search matches folder title, tag title, and artist (case-insensitive substring).
+
+## Performance
+
+- Asynchronous thumbnail generation to keep UI responsive.
+- Disk cache ensures thumbnails appear immediately on subsequent launches.
+
+## Notes
+
+- Audio playback via `pygame`; UI built with `tkinter`/`ttk` and images via Pillow.
+- Metadata combines ID3 tags with folder-name parsing when tags are missing.
+- If you want to regenerate thumbnails at a new size, use Actions → Clear Thumbs.
+# osu! Song Browser
+
 A desktop application for browsing and playing audio files from your osu! Songs directory with a feature-rich GUI.
 
 ## Features
