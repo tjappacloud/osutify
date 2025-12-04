@@ -4,6 +4,8 @@ A fast, thumbnail-rich browser for your osu! `Songs` folder. Play tracks, manage
 
 ## Setup
 
+### Method 1
+
 1. Install dependencies:
 
 	```powershell
@@ -14,6 +16,12 @@ A fast, thumbnail-rich browser for your osu! `Songs` folder. Play tracks, manage
 	```powershell
 	python main.py
 	```
+
+### Method 2
+
+1. Download Installer from releases
+
+2. Follow setup instructions and run program
 
 ## Highlights
 
